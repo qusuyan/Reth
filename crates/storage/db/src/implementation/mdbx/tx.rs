@@ -73,6 +73,11 @@ impl<K: TransactionKind> Tx<K> {
         self.metrics_handler.as_ref().map_or_else(|| self.inner.id(), |handler| Ok(handler.txn_id))
     }
 
+    #[inline]
+    fn txn_id(&self) -> reth_libmdbx::Result<u64> {
+        self.inner.id()
+    }
+
     /// Gets a table database handle if it exists, otherwise creates it.
     pub fn get_dbi<T: Table>(&self) -> Result<MDBX_dbi, DatabaseError> {
         self.inner
@@ -231,9 +236,9 @@ impl<K: TransactionKind> MetricsHandler<K> {
     /// NOTE: Backtrace is recorded using [`Backtrace::force_capture`], so `RUST_BACKTRACE` env var
     /// is not needed.
     fn log_backtrace_on_long_read_transaction(&self) {
-        if self.record_backtrace &&
-            !self.backtrace_recorded.load(Ordering::Relaxed) &&
-            self.transaction_mode().is_read_only()
+        if self.record_backtrace
+            && !self.backtrace_recorded.load(Ordering::Relaxed)
+            && self.transaction_mode().is_read_only()
         {
             let open_duration = self.start.elapsed();
             if open_duration >= self.long_transaction_duration {
@@ -289,6 +294,7 @@ impl<K: TransactionKind> DbTx for Tx<K> {
         &self,
         key: &<T::Key as Encode>::Encoded,
     ) -> Result<Option<T::Value>, DatabaseError> {
+        debug!("Txn {:?} Get: Table={} Key={:?}", self.txn_id(), T::NAME, key);
         self.execute_with_operation_metric::<T, _>(Operation::Get, None, |tx| {
             tx.get(self.get_dbi::<T>()?, key.as_ref())
                 .map_err(|e| DatabaseError::Read(e.into()))?
@@ -298,6 +304,7 @@ impl<K: TransactionKind> DbTx for Tx<K> {
     }
 
     fn commit(self) -> Result<bool, DatabaseError> {
+        debug!("Txn {:?} Commit", self.txn_id());
         self.execute_with_close_transaction_metric(TransactionOutcome::Commit, |this| {
             match this.inner.commit().map_err(|e| DatabaseError::Commit(e.into())) {
                 Ok((v, latency)) => (Ok(v), Some(latency)),
@@ -307,6 +314,7 @@ impl<K: TransactionKind> DbTx for Tx<K> {
     }
 
     fn abort(self) {
+        debug!("Txn {:?} Abort", self.txn_id());
         self.execute_with_close_transaction_metric(TransactionOutcome::Abort, |this| {
             (drop(this.inner), None)
         })
@@ -349,6 +357,7 @@ impl DbTxMut for Tx<RW> {
     fn put<T: Table>(&self, key: T::Key, value: T::Value) -> Result<(), DatabaseError> {
         let key = key.encode();
         let value = value.compress();
+        debug!("Txn {:?} Put: Table={} Key={:?}", self.txn_id(), T::NAME, key);
         self.execute_with_operation_metric::<T, _>(
             Operation::Put,
             Some(value.as_ref().len()),
@@ -378,6 +387,13 @@ impl DbTxMut for Tx<RW> {
             data = Some(value.as_ref());
         };
 
+        debug!(
+            "Txn {:?} Delete: Table={} Key={:?} Check={}",
+            self.txn_id(),
+            T::NAME,
+            key,
+            data.is_some()
+        );
         self.execute_with_operation_metric::<T, _>(Operation::Delete, None, |tx| {
             tx.del(self.get_dbi::<T>()?, key.encode(), data)
                 .map_err(|e| DatabaseError::Delete(e.into()))

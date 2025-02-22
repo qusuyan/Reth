@@ -17,6 +17,8 @@ use reth_libmdbx::{Error as MDBXError, TransactionKind, WriteFlags, RO, RW};
 use reth_storage_errors::db::{DatabaseErrorInfo, DatabaseWriteError, DatabaseWriteOperation};
 use std::{borrow::Cow, collections::Bound, marker::PhantomData, ops::RangeBounds, sync::Arc};
 
+use reth_tracing::tracing::debug;
+
 /// Read only Cursor.
 pub type CursorRO<T> = Cursor<RO, T>;
 /// Read write cursor.
@@ -41,6 +43,11 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         metrics: Option<Arc<DatabaseEnvMetrics>>,
     ) -> Self {
         Self { inner, buf: Vec::new(), metrics, _dbi: PhantomData }
+    }
+
+    #[inline]
+    fn txn_id(&self) -> reth_libmdbx::Result<u64> {
+        self.inner.txn_id()
     }
 
     /// If `self.metrics` is `Some(...)`, record a metric with the provided operation and value
@@ -90,30 +97,39 @@ macro_rules! compress_to_buf_or_ref {
 
 impl<K: TransactionKind, T: Table> DbCursorRO<T> for Cursor<K, T> {
     fn first(&mut self) -> PairResult<T> {
+        debug!("Txn {:?} CursorFirst: Table={}", self.txn_id(), T::NAME);
         decode::<T>(self.inner.first())
     }
 
     fn seek_exact(&mut self, key: <T as Table>::Key) -> PairResult<T> {
-        decode::<T>(self.inner.set_key(key.encode().as_ref()))
+        let key = key.encode();
+        debug!("Txn {:?} CursorSeekExact: Table={} Key={:?}", self.txn_id(), T::NAME, key);
+        decode::<T>(self.inner.set_key(key.as_ref()))
     }
 
     fn seek(&mut self, key: <T as Table>::Key) -> PairResult<T> {
-        decode::<T>(self.inner.set_range(key.encode().as_ref()))
+        let key = key.encode();
+        debug!("Txn {:?} CursorSeek: Table={} Key={:?}", self.txn_id(), T::NAME, key);
+        decode::<T>(self.inner.set_range(key.as_ref()))
     }
 
     fn next(&mut self) -> PairResult<T> {
+        debug!("Txn {:?} CursorNext: Table={}", self.txn_id(), T::NAME);
         decode::<T>(self.inner.next())
     }
 
     fn prev(&mut self) -> PairResult<T> {
+        debug!("Txn {:?} CursorPrev: Table={}", self.txn_id(), T::NAME);
         decode::<T>(self.inner.prev())
     }
 
     fn last(&mut self) -> PairResult<T> {
+        debug!("Txn {:?} CursorLast: Table={}", self.txn_id(), T::NAME);
         decode::<T>(self.inner.last())
     }
 
     fn current(&mut self) -> PairResult<T> {
+        debug!("Txn {:?} CursorCurrent: Table={}", self.txn_id(), T::NAME);
         decode::<T>(self.inner.get_current())
     }
 
@@ -244,6 +260,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     fn upsert(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError> {
         let key = key.encode();
         let value = compress_to_buf_or_ref!(self, value);
+        debug!("Txn {:?} CursorUpsert: Table={} Key={:?}", self.txn_id(), T::NAME, key);
         self.execute_with_operation_metric(
             Operation::CursorUpsert,
             Some(value.unwrap_or(&self.buf).len()),
@@ -266,6 +283,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     fn insert(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError> {
         let key = key.encode();
         let value = compress_to_buf_or_ref!(self, value);
+        debug!("Txn {:?} CursorInsert: Table={} Key={:?}", self.txn_id(), T::NAME, key);
         self.execute_with_operation_metric(
             Operation::CursorInsert,
             Some(value.unwrap_or(&self.buf).len()),
@@ -290,6 +308,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     fn append(&mut self, key: T::Key, value: &T::Value) -> Result<(), DatabaseError> {
         let key = key.encode();
         let value = compress_to_buf_or_ref!(self, value);
+        debug!("Txn {:?} CursorAppend: Table={} Key={:?}", self.txn_id(), T::NAME, key);
         self.execute_with_operation_metric(
             Operation::CursorAppend,
             Some(value.unwrap_or(&self.buf).len()),
@@ -310,6 +329,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
     }
 
     fn delete_current(&mut self) -> Result<(), DatabaseError> {
+        debug!("Txn {:?} CursorDeleteCurrent: Table={}", self.txn_id(), T::NAME);
         self.execute_with_operation_metric(Operation::CursorDeleteCurrent, None, |this| {
             this.inner.del(WriteFlags::CURRENT).map_err(|e| DatabaseError::Delete(e.into()))
         })
@@ -318,6 +338,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
 
 impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
     fn delete_current_duplicates(&mut self) -> Result<(), DatabaseError> {
+        debug!("Txn {:?} CursorDeleteCurrentDuplicates: Table={}", self.txn_id(), T::NAME);
         self.execute_with_operation_metric(Operation::CursorDeleteCurrentDuplicates, None, |this| {
             this.inner.del(WriteFlags::NO_DUP_DATA).map_err(|e| DatabaseError::Delete(e.into()))
         })
@@ -326,6 +347,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
     fn append_dup(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError> {
         let key = key.encode();
         let value = compress_to_buf_or_ref!(self, value);
+        debug!("Txn {:?} CursorAppendDuplicates: Table={} Key={:?}", self.txn_id(), T::NAME, key);
         self.execute_with_operation_metric(
             Operation::CursorAppendDup,
             Some(value.unwrap_or(&self.buf).len()),
